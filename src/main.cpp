@@ -60,6 +60,7 @@ typedef struct
   char address[ADDRESS_SIZE]=""; //static address for this device
   char netmask[ADDRESS_SIZE]=""; //size of network
   bool invertdisplay=false;   //rotate display 180 degrees
+  int measureInterval=DEFAULT_MEASURE_INTERVAL; //How long to wait between measurements
   } conf;
 conf settings; //all settings in one struct makes it easier to store in EEPROM
 boolean settingsAreValid=false;
@@ -81,6 +82,7 @@ box boxStatus;
 
 boolean rssiShowing=false; //used to redraw the RSSI indicator after clearing display
 String lastMessage=""; //contains the last message sent to display. Sometimes need to reshow it
+ulong activityLedTimeoff=millis();
 
 void drawWifiStrength(int32_t rssi)
   {
@@ -193,7 +195,10 @@ void showSettings()
   Serial.print("invertdisplay=1|0 (");
   Serial.print(settings.invertdisplay);
   Serial.println(")");
-
+  Serial.print("measureInterval=<seconds>   (");
+  Serial.print(settings.measureInterval);
+  Serial.println(")");
+ 
   Serial.print("MQTT Client ID is ");
   Serial.println(settings.mqttClientId);
   Serial.print("Address is ");
@@ -315,6 +320,13 @@ bool processCommand(String cmd)
         display.setRotation(settings.invertdisplay?2:0); //go ahead and do it
         saveSettings();
         }
+      else if (strcmp(nme,"measureInterval")==0)
+        {
+        if (!val)
+          strcpy(val,"0");
+        settings.measureInterval=atoi(val);
+        saveSettings();
+        }
       else if ((strcmp(nme,"resetmqttid")==0)&& (strcmp(val,"yes")==0))
         {
         generateMqttClientId(settings.mqttClientId);
@@ -351,6 +363,7 @@ void initializeSettings()
   strcpy(settings.address,"");
   strcpy(settings.netmask,"255.255.255.0");
   settings.invertdisplay=false;
+  settings.measureInterval=DEFAULT_MEASURE_INTERVAL;
   generateMqttClientId(settings.mqttClientId);
   }
 
@@ -440,11 +453,36 @@ bool report(int pressure)
   char reading[18];
   bool ok=true;
   sprintf(topic,"%spressure",settings.mqttTopicRoot);
-  sprintf(reading,"%d",pressure);
+
+  if (pressure >=0)
+    sprintf(reading,"%d",pressure);
+  else
+    sprintf(reading,"error");
+    
   ok=publish(topic,reading,true);
+
+  //publish the radio strength reading while we're at it
+  strcpy(topic,settings.mqttTopicRoot);
+  strcat(topic,MQTT_TOPIC_RSSI);
+  sprintf(reading,"%d",WiFi.RSSI()); 
+  ok=ok|publish(topic,reading,true); //retain
+
+  //publish the status
+  sprintf(topic,"%sstatus",settings.mqttTopicRoot);
+  if (pressure < 0)  //then there was an error reading the sensor
+    {
+    ok=ok|publish(topic,"error",true);
+    }
+  else
+    {
+    ok=ok|publish(topic,"ok",true);
+    }
   
-  Serial.print("Publish ");
-  Serial.println(ok?"OK":"Failed");
+  if (settings.debug)
+    {
+    Serial.print("Publish ");
+    Serial.println(ok?"OK":"Failed");
+    }
   if (!ok)
     show("Pub Fail.");
   return ok;
@@ -916,12 +954,32 @@ float fmap(float value, float fromLow, float fromHigh, float toLow, float toHigh
 
 float read_pressure()
   {
+  digitalWrite(ACTIVITY_LED_PIN,HIGH);
+  activityLedTimeoff=millis()+125; //LED will light for one-eighth second
+
   // The ESP processor can only handle a maximum of 1 volt, so the 
   // D1 mini has a voltage divider on it to allow up to 3.3 volts
   // on the external port pin. We need to convert this reading to 
   // a voltage from 0 to 3.3 volts.
   int reading=analogRead(PRESSURE_SENSOR_PORT);  //reading is unitless 0 to 1023
-  float fReading=fmap((float)reading,0.0f,1023.0f,0.0f,3.32f); //convert to voltage 0v - 3.3v
+
+  // When the pressure is at zero (open air pressure), the input reading will dance
+  // around the actual reading and one that is just low enough to make the code think
+  // that the sensor has failed. Check for this condition and clamp it to the value
+  // for zero if it's just below that. If it's too low then it probably is an actual
+  // sensor failure.
+  if (reading > 100 && reading < 113)
+    {
+    if (settings.debug)
+      {
+      Serial.print("Clamping input reading of ");
+      Serial.print(reading);
+      Serial.println(" to 113");
+      }
+    reading=113;
+    }
+
+  float fReading=fmap((float)reading,114.0f,1023.0f,0.336f,3.3f); //convert to voltage 0v - 3.3v
 
   // Since the ESP board can only accept voltages on the analog port
   // up to 3.3 volts, I had to add another voltage divider to bring the 
@@ -936,6 +994,10 @@ float read_pressure()
 
   if (settings.debug)
     {
+    Serial.print("Raw reading: ");
+    Serial.println(reading);
+    Serial.print("Mapped reading: ");
+    Serial.println(fReading);
     Serial.print("Measured voltage: ");
     Serial.println(sensorVolts);
     }
@@ -948,6 +1010,10 @@ void setup()
   initSerial();
 
   initSettings();
+
+  pinMode(SHOW_PRESSURE_PIN,INPUT_PULLUP); //the button to light up the display
+  pinMode(ACTIVITY_LED_PIN, OUTPUT);
+  digitalWrite(ACTIVITY_LED_PIN, LOW);
 
   if (settingsAreValid)
     {      
@@ -978,7 +1044,11 @@ void loop()
   static unsigned long takeReadingTime=millis();
   static ulong screensaver=millis()+DISPLAY_TIME; //how long to show a message before blanking the display
   static bool cleared=false;  //display has been cleared
+  static int pressure;
   static int lastPressure=0;
+  
+  if (millis() > activityLedTimeoff)
+    digitalWrite(ACTIVITY_LED_PIN,LOW); //turn off the activity LED
 
   if (millis()>screensaver && WiFi.status() == WL_CONNECTED && mqttClient.connected())
     {
@@ -1000,30 +1070,57 @@ void loop()
       {
       reconnect();
       }
+
+    // If the show button is pressed, read and display the pressure
+    // but don't send it to MQTT until the right time
+    bool viewPressure=!digitalRead(SHOW_PRESSURE_PIN); //active low
+    if (viewPressure)
+      {
+      screensaver=millis()+DISPLAY_TIME; 
+      cleared=false;
+      
+      if (pressure>=0)
+        show(String(pressure)+" PSI");
+      else
+        show("Sensor\nFailure");
+      }
+
     if (millis() >= takeReadingTime)  //time to read the sensor
       {
-      int pressure=read_pressure();
+      pressure=read_pressure();
       report(pressure);
 
-      
-      if (lastPressure != pressure)
+      if (pressure>=0)
         {
-        if (settings.debug)
+        if (lastPressure != pressure)
           {
-          Serial.println("Showing display");
+          if (settings.debug)
+            {
+            Serial.println("Showing display");
+            }
+          show(String(pressure)+" PSI");
+          lastPressure=pressure;
+          screensaver=millis()+DISPLAY_TIME; //when to blank the display
+          cleared=false;
           }
-        show(String(pressure)+" PSI");
-        lastPressure=pressure;
+        Serial.print(pressure);
+        Serial.println(" PSI");
+        }
+      else
+        {
+        show("Sensor\nFailure");
+        lastPressure=0;
         screensaver=millis()+DISPLAY_TIME; //when to blank the display
         cleared=false;
+        Serial.println("Pressure sensor failure.");
         }
 
-      takeReadingTime=millis()+MEASURE_INTERVAL;
+      takeReadingTime=millis()+settings.measureInterval*1000;
     
       //handle the case that millis is about to roll over to zero
       if (takeReadingTime<millis()) //overflow!
         {
-        delay(MEASURE_INTERVAL); //let millis() catch up
+        delay(settings.measureInterval*1000); //let millis() catch up
         }
       }
     mqttClient.loop();

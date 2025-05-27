@@ -9,7 +9,6 @@
 #define MQTT_CLIENTID_SIZE 25
 #define MQTT_TOPIC_SIZE 150
 #define MQTT_TOPIC_DISTANCE "distance"
-#define MQTT_TOPIC_STATE "present"
 #define MQTT_TOPIC_BATTERY "battery"
 #define MQTT_TOPIC_ANALOG "analog"
 #define MQTT_TOPIC_RSSI "rssi"
@@ -39,8 +38,10 @@
 #define SHOWBUF_WIDTH 20     // Max size of entries in the show buffer
 
 #define PRESSURE_SENSOR_PORT A0 //Analog port to which the pressure sensor is attached
-#define MEASURE_INTERVAL 5000 // 5 seconds between readings
+#define DEFAULT_MEASURE_INTERVAL 5000 // Time in milliseconds between readings
 #define DISPLAY_TIME 5000  // Show the display only for this long when value changes
+#define SHOW_PRESSURE_PIN D5 // Pull this pin low to display the pressure
+#define ACTIVITY_LED_PIN D4 // LED flashes when taking measurement
 
 // --- POLYNOMIAL COEFFICIENTS USED TO CONVERT VOLTS TO PSI ---
 // Obtained from LibreOffice Calc's LINEST function
