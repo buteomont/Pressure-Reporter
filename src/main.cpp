@@ -570,9 +570,13 @@ void incomingMqttHandler(char* reqTopic, byte* payload, unsigned int length)
     strcat(jsonStatus,settings.address);
     strcat(jsonStatus,"\", \"netmask\":\"");
     strcat(jsonStatus,settings.netmask);
-   
     strcat(jsonStatus,"\", \"debug\":\"");
     strcat(jsonStatus,settings.debug?"true":"false");
+    strcat(jsonStatus,"\", \"invertdisplay\":\"");
+    strcat(jsonStatus,settings.invertdisplay?"true":"false");
+    strcat(jsonStatus,"\", \"measureInterval\":");
+    sprintf(tempbuf,"%d",settings.measureInterval);
+    strcat(jsonStatus,tempbuf);
     strcat(jsonStatus,"\", \"IPAddress\":\"");
     strcat(jsonStatus,wifiClient.localIP().toString().c_str());
     
@@ -1118,10 +1122,10 @@ void loop()
       takeReadingTime=millis()+settings.measureInterval*1000;
     
       //handle the case that millis is about to roll over to zero
-      if (takeReadingTime<millis()) //overflow!
-        {
-        delay(settings.measureInterval*1000); //let millis() catch up
-        }
+      // if (takeReadingTime<millis()) //overflow!
+      //   {
+      //   delay(settings.measureInterval*1000); //let millis() catch up
+      //   }
       }
     mqttClient.loop();
     }
