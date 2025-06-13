@@ -143,7 +143,7 @@ void show(String msg)
     display.setTextSize(3);      // Normal 1:1 pixel scale
     }
   display.println(msg);
-  if (rssiShowing)
+  if (rssiShowing && msg.length()>0)
     {
     drawWifiStrength(WiFi.RSSI());
     }
