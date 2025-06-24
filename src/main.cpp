@@ -195,7 +195,7 @@ void showSettings()
   Serial.print("invertdisplay=1|0 (");
   Serial.print(settings.invertdisplay);
   Serial.println(")");
-  Serial.print("measureInterval=<seconds>   (");
+  Serial.print("measureinterval=<seconds>   (");
   Serial.print(settings.measureInterval);
   Serial.println(")");
  
@@ -320,7 +320,7 @@ bool processCommand(String cmd)
         display.setRotation(settings.invertdisplay?2:0); //go ahead and do it
         saveSettings();
         }
-      else if (strcmp(nme,"measureInterval")==0)
+      else if (strcmp(nme,"measureinterval")==0)
         {
         if (!val)
           strcpy(val,"0");
@@ -381,67 +381,165 @@ void checkForCommand()
   }
 
 
+/*
+Spec sheet says readings are linear from 0.5v @ 0psi to 4.5v @ 150psi.
+It also says the voltage @ 100psi is 2.5v.  This is not a linear progression.
+I have my doubts but that's what I'm using here.  The input voltage
+argument has already been stepped down by the voltage divider to a maximum
+of 3.3v.
+*/
+
+
+/*
+Spec sheet says readings are linear from 0.5v @ 0psi to 4.5v @ 150psi.
+It also says the voltage @ 100psi is 2.5v.  This is not a linear progression.
+I am dubious so I made my own measurements at the sensor:
+
+Pressure	Measured Volts	Raw ADC Value
+0	        0.51	          120
+10	      0.67	          153
+20	      0.91	          217
+30	      1.16	          270
+40	      1.42	          327
+50	      1.70	          379
+60	      1.98	          442
+70	      2.24	          495
+80	      2.51	          555
+90	      2.76	          610
+100	      3.03	          664
+108	      3.27	          714
+
+
+The two functions below were written by Gemini.
+*/
+
+///////////////////////////////////////////////////////////////////////////
+
+// Define the new linear coefficients for ADC reading to Pressure
+// These coefficients directly map raw ADC values to PSI for the range >= 20 PSI.
+// Derived from measured ADC values.
+#define LINEAR_M_ADC 0.19967664f     // Slope (m)
+#define LINEAR_C_ADC -22.95159025f   // Y-intercept (c)
+
+// Define the approximate raw ADC reading for 0 PSI from your calibration data (120)
+#define ADC_READING_0PSI_CALIBRATED 120
+
+// Define the approximate raw ADC reading for 20 PSI from your calibration data (217)
+// This marks the lower bound of the linear fit's accurate range.
+#define ADC_READING_10PSI_CALIBRATED 153
+
+
 /**
- * @brief Converts a voltage reading to pressure (PSI) using a 2nd order polynomial fit.
- * The polynomial equation is: Volts = a * Pressure^2 + b * Pressure + c
- * This function solves for pressure using the quadratic formula.
- * Function was developed with the assistance of Google Gemini and LibreOffice Calc
- * 
- * @param voltage_v The measured voltage in volts.
- * @return The calculated pressure in PSI. Returns a special value (e.g., -1.0)
- * if the voltage is outside the valid range or results in no real solution.
+ * @brief Converts a raw ADC reading to pressure (PSI) using a linear fit.
+ * The polynomial equation is: Pressure = m * ADC_Reading + c
+ * This function directly calculates pressure using coefficients derived from
+ * raw ADC readings vs. measured pressures for the >= 20 PSI range.
+ * @param adc_reading The measured raw ADC reading (0-1023).
+ * @return The calculated pressure in PSI.
  */
-float convertVoltageToPressure(float voltage_v)
+float convertADCToPressureLinear(int adc_reading)
   {
-  // Rearrange the polynomial to the quadratic form: a*P^2 + b*P + (c - V) = 0
-  // Here, (c - V) is the 'C' term in the standard quadratic equation Ax^2 + Bx + C = 0
-  // Our A = POLY_A, B = POLY_B, and C_quadratic = POLY_C - voltage_v
+  // Ensure adc_reading is cast to float for floating-point arithmetic
+  float calculatedPressure = LINEAR_M_ADC * (float)adc_reading + LINEAR_C_ADC;
 
-  float C_quadratic = POLY_C - voltage_v;
-
-  // Calculate the discriminant (the part under the square root in the quadratic formula)
-  float discriminant = POLY_B * POLY_B - 4 * POLY_A * C_quadratic;
-
-  // Check if there's a real solution (discriminant must be non-negative)
-  if (discriminant < 0) 
+  // Add robust checks to ensure the output pressure is within the expected physical range
+  if (calculatedPressure < MIN_PRESSURE_PSI) // Assuming MIN_PRESSURE_PSI is 0.0f
     {
-    // No real solution for pressure with this voltage.
-    // This might happen if the voltage is outside the range that the polynomial covers,
-    // or if there's sensor noise pushing it beyond the valid mathematical domain.
-    Serial.println("Error: Discriminant < 0. Voltage out of calculated range.");
-    return -1.0; // Return an error indicator
+    if (settings.debug)
+      {
+      Serial.print("Warning: Calculated pressure (");
+      Serial.print(calculatedPressure, 2); // Print with 2 decimal places
+      Serial.println(") is below MIN_PRESSURE_PSI. Clamping.");
+      }
+    calculatedPressure = MIN_PRESSURE_PSI; // Clamp to minimum
+    }
+  else if (calculatedPressure > MAX_PRESSURE_PSI) // Assuming MAX_PRESSURE_PSI is 150.0f
+    {
+    if (settings.debug)
+      {
+      Serial.print("Warning: Calculated pressure (");
+      Serial.print(calculatedPressure, 2);
+      Serial.println(") is above MAX_PRESSURE_PSI. Clamping.");
+      }
+    calculatedPressure = MAX_PRESSURE_PSI; // Clamp to maximum
     }
 
-  // Calculate the two possible solutions for Pressure
-  // The quadratic formula gives two roots, but only one will be physically meaningful
-  float pressure1 = (-POLY_B + sqrt(discriminant)) / (2 * POLY_A);
-  float pressure2 = (-POLY_B - sqrt(discriminant)) / (2 * POLY_A);
-
-  // Determine the physically meaningful pressure value within the expected range
-  // Since pressure typically increases with voltage for these sensors, we expect one positive root.
-  // We should check which root falls within our sensor's operating range (0-150 PSI).
-
-  if (pressure1 >= MIN_PRESSURE_PSI && pressure1 <= MAX_PRESSURE_PSI) 
-    {
-    return pressure1;
-    } 
-  else if (pressure2 >= MIN_PRESSURE_PSI && pressure2 <= MAX_PRESSURE_PSI) 
-    {
-    return pressure2;
-    }
-  else 
-    {
-    // Neither calculated pressure is within the expected range.
-    // This can happen if the measured voltage is outside the sensor's
-    // calibrated range (e.g., negative pressure, or pressure beyond max).
-    Serial.print("Error: Calculated pressure (");
-    Serial.print(pressure1, 2);
-    Serial.print(", ");
-    Serial.print(pressure2, 2);
-    Serial.println(") is outside expected range.");
-    return -1.0; // Return an error indicator
+  return calculatedPressure; // Single exit point
   }
-}
+
+
+float read_pressure()
+  {
+  float finalPressure = 0.0f; // Variable to hold the calculated pressure for a single exit point
+
+  digitalWrite(ACTIVITY_LED_PIN,HIGH);
+  activityLedTimeoff = millis() + 125; // LED will light for one-eighth second
+
+  int reading = analogRead(PRESSURE_SENSOR_PORT);  // reading is unitless 0 to 1023
+
+  if (settings.debug)
+    {
+    Serial.print("Raw ADC reading: ");
+    Serial.println(reading);
+    }
+
+  // Handle ADC readings that are below the effective range of our linear fit (below 20 PSI).
+  // Given gauge inaccuracy below 20 PSI and that this range is rare.
+  if (reading < ADC_READING_10PSI_CALIBRATED)
+    {
+    if (settings.debug)
+      {
+      Serial.print("ADC reading (");
+      Serial.print(reading);
+      Serial.print(") is below the 10 PSI calibrated range (ADC ");
+      Serial.print(ADC_READING_10PSI_CALIBRATED);
+      Serial.println(").");
+      }
+
+    // Specific clamping for readings very close to 0 PSI to manage noise.
+    // If the reading is within a small window around the 0 PSI calibrated point.
+    if (reading >= ADC_READING_0PSI_CALIBRATED - 10 && reading <= ADC_READING_0PSI_CALIBRATED + 10)
+      {
+      if (settings.debug)
+        {
+        Serial.print("Clamping pressure to 0 PSI due to proximity to ADC ");
+        Serial.println(ADC_READING_0PSI_CALIBRATED);
+        }
+      finalPressure = MIN_PRESSURE_PSI; // Explicitly set to 0 PSI
+      }
+    else if (reading < ADC_READING_0PSI_CALIBRATED - 10) // Significantly below 0 PSI equivalent (e.g., sensor fault)
+      {
+      if (settings.debug)
+        {
+        Serial.print("Warning: ADC reading (");
+        Serial.print(reading);
+        Serial.println(") is extremely low, indicating possible sensor fault or out of range.");
+        }
+      finalPressure = -1; // Sensor error
+      }
+    else // For readings between ~0 PSI and 20 PSI (ADC 130-216), where gauge is less reliable
+      {
+      if (settings.debug)
+        {
+        Serial.println("Applying linear model to low-pressure region; note potential gauge inaccuracy here.");
+        }
+      // Apply the linear model, understanding its reduced accuracy/validity in this range based on your gauge insight.
+      finalPressure = convertADCToPressureLinear(reading);
+      }
+    }
+  // For all other readings (>= ADC_READING_10PSI_CALIBRATED), apply the main linear conversion
+  else
+    {
+    finalPressure = convertADCToPressureLinear(reading);
+    }
+
+  return finalPressure; // Single exit point
+  }
+
+
+/////////////////////////////////////////////////////////////////////////
+
+
 
 
 /************************
@@ -574,7 +672,7 @@ void incomingMqttHandler(char* reqTopic, byte* payload, unsigned int length)
     strcat(jsonStatus,settings.debug?"true":"false");
     strcat(jsonStatus,"\", \"invertdisplay\":\"");
     strcat(jsonStatus,settings.invertdisplay?"true":"false");
-    strcat(jsonStatus,"\", \"measureInterval\":");
+    strcat(jsonStatus,"\", \"measureinterval\":");
     sprintf(tempbuf,"%d",settings.measureInterval);
     strcat(jsonStatus,tempbuf);
     strcat(jsonStatus,"\", \"IPAddress\":\"");
@@ -869,7 +967,8 @@ void connectToWiFi()
   {
   if (settingsAreValid && WiFi.status() != WL_CONNECTED)
     {
-    show("Connecting\nto WiFi");
+    if (settings.debug)
+      show("Connecting\nto WiFi");
     Serial.print("Attempting to connect to WPA SSID \"");
     Serial.print(settings.ssid);
     Serial.println("\"");
@@ -921,7 +1020,8 @@ void connectToWiFi()
         rssiShowing=true;
         show(lastMessage);
         }
-      show("Connected\nTo Wifi");
+      if (settings.debug)
+        show("Connected\nTo Wifi");
       }
     }
   }
@@ -956,58 +1056,58 @@ float fmap(float value, float fromLow, float fromHigh, float toLow, float toHigh
   return toLow+(value-fromLow)*(toHigh-toLow)/(fromHigh-fromLow);
   }
 
-float read_pressure()
-  {
-  digitalWrite(ACTIVITY_LED_PIN,HIGH);
-  activityLedTimeoff=millis()+125; //LED will light for one-eighth second
+// float read_pressure()
+//   {
+//   digitalWrite(ACTIVITY_LED_PIN,HIGH);
+//   activityLedTimeoff=millis()+125; //LED will light for one-eighth second
 
-  // The ESP processor can only handle a maximum of 1 volt, so the 
-  // D1 mini has a voltage divider on it to allow up to 3.3 volts
-  // on the external port pin. We need to convert this reading to 
-  // a voltage from 0 to 3.3 volts.
-  int reading=analogRead(PRESSURE_SENSOR_PORT);  //reading is unitless 0 to 1023
+//   // The ESP processor can only handle a maximum of 1 volt, so the 
+//   // D1 mini has a voltage divider on it to allow up to 3.3 volts
+//   // on the external port pin. We need to convert this reading to 
+//   // a voltage from 0 to 3.3 volts.
+//   int reading=analogRead(PRESSURE_SENSOR_PORT);  //reading is unitless 0 to 1023
 
-  // When the pressure is at zero (open air pressure), the input reading will dance
-  // around the actual reading and one that is just low enough to make the code think
-  // that the sensor has failed. Check for this condition and clamp it to the value
-  // for zero if it's just below that. If it's too low then it probably is an actual
-  // sensor failure.
-  if (reading > 100 && reading < 113)
-    {
-    if (settings.debug)
-      {
-      Serial.print("Clamping input reading of ");
-      Serial.print(reading);
-      Serial.println(" to 113");
-      }
-    reading=113;
-    }
+//   // When the pressure is at zero (open air pressure), the input reading will dance
+//   // around the actual reading and one that is just low enough to make the code think
+//   // that the sensor has failed. Check for this condition and clamp it to the value
+//   // for zero if it's just below that. If it's too low then it probably is an actual
+//   // sensor failure.
+//   if (reading > 100 && reading < 113)
+//     {
+//     if (settings.debug)
+//       {
+//       Serial.print("Clamping input reading of ");
+//       Serial.print(reading);
+//       Serial.println(" to 113");
+//       }
+//     reading=113;
+//     }
 
-  float fReading=fmap((float)reading,114.0f,1023.0f,0.336f,3.3f); //convert to voltage 0v - 3.3v
+//   float fReading=fmap((float)reading,114.0f,1023.0f,0.336f,3.3f); //convert to voltage 0v - 3.3v
 
-  // Since the ESP board can only accept voltages on the analog port
-  // up to 3.3 volts, I had to add another voltage divider to bring the 
-  // maximum 5v from the sensor down to the maximum 3.3v that the 
-  // board can handle.  This line reverses the effects of that.
+//   // Since the ESP board can only accept voltages on the analog port
+//   // up to 3.3 volts, I had to add another voltage divider to bring the 
+//   // maximum 5v from the sensor down to the maximum 3.3v that the 
+//   // board can handle.  This line reverses the effects of that.
 
-  //voltage divider values in schematic
-  #define R1b 4932.0f
-  #define R2b 9681.0f
+//   // Measured voltage divider values in schematic
+//   #define R1 4932.0f
+//   #define R2 9681.0f
 
-  float sensorVolts=fReading/(R2b/(R1b+R2b)); //this gives the voltage from the sensor 
+//   float sensorVolts=fReading/(R2/(R1+R2)); //this gives the voltage from the sensor 
 
-  if (settings.debug)
-    {
-    Serial.print("Raw reading: ");
-    Serial.println(reading);
-    Serial.print("Mapped reading: ");
-    Serial.println(fReading);
-    Serial.print("Measured voltage: ");
-    Serial.println(sensorVolts);
-    }
+//   if (settings.debug)
+//     {
+//     Serial.print("Raw reading: ");
+//     Serial.println(reading);
+//     Serial.print("Mapped reading: ");
+//     Serial.println(fReading);
+//     Serial.print("Measured voltage: ");
+//     Serial.println(sensorVolts);
+//     }
 
-  return convertVoltageToPressure(sensorVolts);
-  }
+//   return convertVoltageToPressure(sensorVolts);
+//   }
 
 void setup()
   {
@@ -1064,6 +1164,56 @@ void loop()
     cleared=true;
     }
 
+  // If the show button is pressed, read and display the pressure
+  // but don't send it to MQTT until the right time
+  bool viewPressure=!digitalRead(SHOW_PRESSURE_PIN); //active low
+  if (viewPressure)
+    {
+    screensaver=millis()+DISPLAY_TIME; 
+    cleared=false;
+    
+    if (pressure>=0)
+      show(String(pressure)+" PSI");
+    else
+      show("Sensor\nFailure");
+    }
+
+  if (millis() >= takeReadingTime)  //time to read the sensor
+    {
+    pressure=read_pressure();
+    if (mqttClient.connected() && WiFi.status() == WL_CONNECTED)
+      {
+      report(pressure);
+      }
+
+    if (pressure>=0)
+      {
+      if (lastPressure != pressure)
+        {
+        if (settings.debug)
+          {
+          Serial.println("Showing display");
+          }
+        show(String(pressure)+" PSI");
+        lastPressure=pressure;
+        screensaver=millis()+DISPLAY_TIME; //when to blank the display
+        cleared=false;
+        }
+      Serial.print(pressure);
+      Serial.println(" PSI");
+      }
+    else
+      {
+      show("Sensor\nFailure");
+      lastPressure=0;
+      screensaver=millis()+DISPLAY_TIME; //when to blank the display
+      cleared=false;
+      Serial.println("Pressure sensor failure.");
+      }
+
+    takeReadingTime=millis()+settings.measureInterval*1000;
+    }
+
   if (settingsAreValid)
     {      
     if (WiFi.status() != WL_CONNECTED)
@@ -1073,61 +1223,10 @@ void loop()
     if (!mqttClient.connected() && WiFi.status() == WL_CONNECTED)
       {
       reconnect();
-      }
+      }  
+    else 
+      mqttClient.loop();
 
-    // If the show button is pressed, read and display the pressure
-    // but don't send it to MQTT until the right time
-    bool viewPressure=!digitalRead(SHOW_PRESSURE_PIN); //active low
-    if (viewPressure)
-      {
-      screensaver=millis()+DISPLAY_TIME; 
-      cleared=false;
-      
-      if (pressure>=0)
-        show(String(pressure)+" PSI");
-      else
-        show("Sensor\nFailure");
-      }
-
-    if (millis() >= takeReadingTime)  //time to read the sensor
-      {
-      pressure=read_pressure();
-      report(pressure);
-
-      if (pressure>=0)
-        {
-        if (lastPressure != pressure)
-          {
-          if (settings.debug)
-            {
-            Serial.println("Showing display");
-            }
-          show(String(pressure)+" PSI");
-          lastPressure=pressure;
-          screensaver=millis()+DISPLAY_TIME; //when to blank the display
-          cleared=false;
-          }
-        Serial.print(pressure);
-        Serial.println(" PSI");
-        }
-      else
-        {
-        show("Sensor\nFailure");
-        lastPressure=0;
-        screensaver=millis()+DISPLAY_TIME; //when to blank the display
-        cleared=false;
-        Serial.println("Pressure sensor failure.");
-        }
-
-      takeReadingTime=millis()+settings.measureInterval*1000;
-    
-      //handle the case that millis is about to roll over to zero
-      // if (takeReadingTime<millis()) //overflow!
-      //   {
-      //   delay(settings.measureInterval*1000); //let millis() catch up
-      //   }
-      }
-    mqttClient.loop();
     }
   checkForCommand();
   }

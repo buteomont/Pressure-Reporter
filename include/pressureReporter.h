@@ -38,7 +38,7 @@
 #define SHOWBUF_WIDTH 20     // Max size of entries in the show buffer
 
 #define PRESSURE_SENSOR_PORT A0 //Analog port to which the pressure sensor is attached
-#define DEFAULT_MEASURE_INTERVAL 5000 // Time in milliseconds between readings
+#define DEFAULT_MEASURE_INTERVAL 5 // Time in seconds between readings
 #define DISPLAY_TIME 5000  // Show the display only for this long when value changes
 #define SHOW_PRESSURE_PIN D5 // Pull this pin low to display the pressure
 #define ACTIVITY_LED_PIN D4 // LED flashes when taking measurement
